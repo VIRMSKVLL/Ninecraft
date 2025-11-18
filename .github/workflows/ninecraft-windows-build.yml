@@ -1,5 +1,6 @@
 name: Windows build
 
+# Triggers
 on:
   push:
   pull_request:
@@ -7,43 +8,77 @@ on:
 
 jobs:
   build-windows:
-    name: Build on Windows
     runs-on: windows-latest
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Show runner info (debug)
+        run: |
+          echo "Runner: $RUNNER_OS"
+          echo "PATH:"
+          echo %PATH%
+        shell: cmd
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
-      - name: Install MinGW (via package manager) and add to PATH
+      - name: Install Python jinja2
+        run: python -m pip install --upgrade pip && python -m pip install jinja2
         shell: powershell
-        run: |
-          choco install mingw -y
-          refreshenv
-          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
-          if ($gcc) {
-            $dir = Split-Path $gcc.Path
-            echo "PATH=$env:PATH;$dir" >> $env:GITHUB_ENV
-            Write-Host "Added MinGW bin to PATH: $dir"
-          } else {
-            Write-Host "Warning: gcc not found after choco install mingw"
-          }
 
-      - name: Ensure CMake available
-        uses: actions/setup-cmake@v4
+      - name: Try MSVC build (if compile-msvc.bat exists)
+        id: try-msvc
+        shell: cmd
+        run: |
+          if exist "compile-msvc.bat" (
+            echo "Found compile-msvc.bat — running MSVC build..."
+            call "compile-msvc.bat"
+            exit /b %ERRORLEVEL%
+          ) else (
+            echo "::set-output name=skip::true"
+            exit /b 0
+          )
+
+      - name: If MSVC succeeded, skip MinGW steps
+        if: ${{ always() && !contains(steps.try-msvc.outputs.skip, 'true') && success() }}
+        run: echo "MSVC build completed; skipping MinGW fallback."
+        shell: powershell
+
+      - name: MSYS2 + MinGW fallback (run only if MSVC step didn't run or user requested MinGW)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        uses: msys2/setup-msys2@v2
         with:
-          cmake-version: '>=3.20'
+          msystem: MINGW32
+          update: true
+          install: >
+            mingw-w64-i686-toolchain
+            mingw-w64-i686-cmake
+            mingw-w64-i686-python
+            mingw-w64-i686-pkg-config
+            make
+          path-style: unix
 
-      - name: Install Python Jinja2 (README requirement)
-        shell: powershell
+      - name: Add MSYS2 mingw to PATH (fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install jinja2
+          echo "Adding MSYS2 MinGW to PATH for this job..."
+          echo "C:\msys64\mingw32\bin" >> $env:GITHUB_PATH
+        shell: powershell
 
-      - name: Run compile.bat
+      - name: Debug: show gcc and cmake versions (fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        shell: bash
+        run: |
+          which gcc || true
+          gcc --version || true
+          which cmake || true
+          cmake --version || true
+
+      - name: Run compile.bat (MinGW fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
         shell: cmd
         run: |
           echo Running compile.bat from "%CD%"
@@ -55,6 +90,7 @@ jobs:
           )
 
       - name: Upload build artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
