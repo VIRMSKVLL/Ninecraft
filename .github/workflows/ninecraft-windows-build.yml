@@ -2,50 +2,105 @@
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
 name: Ninecraft nightly build for windows
 
+# Triggers
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
-env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  BUILD_TYPE: Release
-
 jobs:
-  build:
-    # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
-    # You can convert this to a matrix build if you need cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+  build-windows:
     runs-on: windows-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      - name: Show runner info (debug)
+        run: |
+          echo "Runner: $RUNNER_OS"
+          echo "PATH:"
+          echo %PATH%
+        shell: cmd
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install jinja2
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
 
-    - name: Gather git submodules
-      run: git submodule update --init
+      - name: Install Python jinja2
+        run: python -m pip install --upgrade pip && python -m pip install jinja2
+        shell: powershell
 
-    - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -B ${{github.workspace}}/build -A Win32 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DPYTHON_EXECUTABLE=${{env.pythonLocation}}/python.exe
+      - name: Try MSVC build (if compile-msvc.bat exists)
+        id: try-msvc
+        shell: cmd
+        run: |
+          if exist "compile-msvc.bat" (
+            echo "Found compile-msvc.bat — running MSVC build..."
+            call "compile-msvc.bat"
+            exit /b %ERRORLEVEL%
+          ) else (
+            echo "::set-output name=skip::true"
+            exit /b 0
+          )
 
-    - name: Build
-      # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+      - name: If MSVC succeeded, skip MinGW steps
+        if: ${{ always() && !contains(steps.try-msvc.outputs.skip, 'true') && success() }}
+        run: echo "MSVC build completed; skipping MinGW fallback."
+        shell: powershell
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: toolchain
-        path: |
+      - name: MSYS2 + MinGW fallback (run only if MSVC step didn't run or user requested MinGW)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          install: >
+            mingw-w64-i686-toolchain
+            mingw-w64-i686-cmake
+            mingw-w64-i686-python
+            mingw-w64-i686-pkg-config
+            make
+          path-style: unix
+
+      - name: Add MSYS2 mingw to PATH (fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        run: |
+          echo "Adding MSYS2 MinGW to PATH for this job..."
+          echo "C:\msys64\mingw32\bin" >> $env:GITHUB_PATH
+        shell: powershell
+
+      - name: Debug: show gcc and cmake versions (fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        shell: bash
+        run: |
+          which gcc || true
+          gcc --version || true
+          which cmake || true
+          cmake --version || true
+
+      - name: Run compile.bat (MinGW fallback)
+        if: ${{ failure() || steps.try-msvc.outputs.skip == 'true' }}
+        shell: cmd
+        run: |
+          echo Running compile.bat from "%CD%"
+          if exist "compile.bat" (
+            call "compile.bat"
+          ) else (
+            echo ERROR: compile.bat not found in "%CD%"
+            exit /b 1
+          )
+
+      - name: Upload build artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            build-win32/**
+            build-win32/**/*.exe
+            *.exe
+          if-no-files-found: warn
           build/ninecraft/${{env.BUILD_TYPE}}/ninecraft.exe
           internal_overrides
 
